@@ -13,6 +13,7 @@ namespace AudioPropagation {
 inline constexpr std::int32_t ErrorInvalidArgument = static_cast<std::int32_t>(0x8A700001);
 inline constexpr std::int32_t ErrorInvalidHandle = static_cast<std::int32_t>(0x8A700002);
 inline constexpr std::int32_t ErrorNullPointer = static_cast<std::int32_t>(0x8A700003);
+inline constexpr std::int32_t ErrorInvalidDescriptor = static_cast<std::int32_t>(0x8A700007);
 
 inline constexpr std::uint32_t MaterialId = 0x010107d1;
 inline constexpr std::size_t MaterialSize = 0x40;
@@ -177,6 +178,19 @@ static_assert(sizeof(AudioPath) == 224);
 static_assert(offsetof(AudioPath, points) == 16);
 static_assert(offsetof(AudioPath, pointCount) == 208);
 static_assert(offsetof(AudioPath, flags) == 212);
+
+struct PathEntry {
+    AudioPropagationStructDescriptor desc;
+    AudioPropagationHandle path;
+    const AudioPath* data;
+    float gain;
+    std::uint32_t reserved;
+};
+
+static_assert(sizeof(PathEntry) == PathEntrySize);
+static_assert(offsetof(PathEntry, path) == 16);
+static_assert(offsetof(PathEntry, data) == 24);
+static_assert(offsetof(PathEntry, gain) == 32);
 
 struct RenderInfo {
     AudioPropagationStructDescriptor desc;
