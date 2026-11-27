@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Queues/SubmissionProgress.hpp"
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -19,6 +20,8 @@
 #include <vector>
 
 namespace AgcDriver::DriverDetail {
+
+using ReferencedProgramPairs = std::array<bool, 7>;
 
 struct FlipWork {
     bool finished = false;
@@ -55,6 +58,7 @@ struct Submission {
     std::chrono::steady_clock::time_point orderedAt{};
     const std::uint32_t* rewindTail = nullptr;
     std::size_t rewindWords = 0;
+    ReferencedProgramPairs boundPrograms{};
     using PreparedWaits = std::map<std::pair<std::uint32_t, std::uint32_t>, std::shared_ptr<IRenderingWait>>;
     struct IndirectSegment {
         std::size_t start;
@@ -81,9 +85,10 @@ struct QueueWorker {
 struct ReferencedProgramScan {
     std::vector<std::uint64_t> addresses;
     bool complete = true;
+    ReferencedProgramPairs bound{};
 };
 
-ReferencedProgramScan ReferencedPrograms(std::span<const std::uint32_t> commands, const std::map<std::size_t, std::vector<std::uint32_t>>& registerLists);
+ReferencedProgramScan ReferencedPrograms(std::span<const std::uint32_t> commands, const std::map<std::size_t, std::vector<std::uint32_t>>& registerLists, const ReferencedProgramPairs& boundBefore = {});
 
 }
 

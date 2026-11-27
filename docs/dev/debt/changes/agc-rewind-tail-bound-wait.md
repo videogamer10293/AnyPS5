@@ -1,0 +1,5 @@
+# libSceAgcDriver
+
+## change [Registration preparation at submit]
+
+- [Registration preparation at submit](../../../core/libs/prx/libSceAgcDriver/Execution/src/Driver/Queues/Submission.cpp) (libSceAgcDriver) - `Driver::Submit`, and the queue worker before each REWIND tail, wait only for pool-held preparations of programs they bind (`*_PGM_LO/HI` by `SET_SH_REG` or `SET_SH_REG_INDIRECT`); a tail counts the pairs bound before its REWIND. Each waits for all queued ones if a pair is half written, a draw (dispatch) has no graphics (compute) pair bound before it, a list has an invalid register, or a predicated or `COND_EXEC`-guarded write sets a program register. A tail's wait holds the queue worker. Not covered: a program re-registered at an address bound earlier and used without rebinding, by a later submission that writes another graphics pair or by a tail; its first draw waits in the queue worker, unbounded (74 s for the largest shader seen). Goat Simulator 3 (PPSA04159)'s 10 s margin and how often titles write half a pair are not measured.

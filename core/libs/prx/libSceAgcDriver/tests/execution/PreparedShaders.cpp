@@ -646,21 +646,57 @@ void UnprovenProgramsAtSubmit() {
     const std::vector<std::uint32_t> unrelatedWrite{0xc0017600u, 0x2e0u, 1};
     const std::vector<std::uint32_t> shortRange{0xc0032200u, 0, 0, 0, 3};
     Require(AgcDriver::DriverDetail::ReferencedPrograms(joined({&shortRange, &unrelatedWrite, &pair}), {}).complete, "a pair after a conditional execution range holding another register was reported as not fully scanned");
-    alignas(4) static std::array<std::uint32_t, 4> rewound{0xc0005900u, 0, 0xc0001000u, 0};
-    {
+    const auto pairsOf = [](std::initializer_list<std::size_t> slots) {
+        AgcDriver::DriverDetail::ReferencedProgramPairs pairs{};
+        for (const auto slot : slots) pairs[slot] = true;
+        return pairs;
+    };
+    Require(AgcDriver::DriverDetail::ReferencedPrograms(graphicsPair, {}).bound == pairsOf({0}), "a pixel program pair was not reported as bound at the end of the commands");
+    Require(AgcDriver::DriverDetail::ReferencedPrograms(joined({&graphicsPair, &pair}), {}).bound == pairsOf({0, 6}), "a pixel and a compute program pair were not both reported as bound");
+    Require(AgcDriver::DriverDetail::ReferencedPrograms(lowOnly, {}).bound == pairsOf({}), "half of a compute program pair was reported as bound");
+    const auto carriedDraw = AgcDriver::DriverDetail::ReferencedPrograms(draw, {}, pairsOf({0}));
+    Require(carriedDraw.complete && carriedDraw.addresses.empty(), "a draw after a pixel program pair bound before its commands was reported as not fully scanned");
+    Require(carriedDraw.bound == pairsOf({0}), "a program pair bound before the commands was not reported as bound after them");
+    Require(AgcDriver::DriverDetail::ReferencedPrograms(dispatch, {}, pairsOf({6})).complete, "a dispatch after a compute program pair bound before its commands was reported as not fully scanned");
+    Require(!AgcDriver::DriverDetail::ReferencedPrograms(draw, {}, pairsOf({6})).complete, "a draw after only a compute program pair bound before its commands was reported as fully scanned");
+    Require(!AgcDriver::DriverDetail::ReferencedPrograms(dispatch, {}, pairsOf({0})).complete, "a dispatch after only a pixel program pair bound before its commands was reported as fully scanned");
+    const std::vector<std::uint32_t> pixelLowOnly{0xc0017600u, 0x008u, low};
+    Require(!AgcDriver::DriverDetail::ReferencedPrograms(joined({&pixelLowOnly, &draw}), {}, pairsOf({0})).complete, "half of a pixel program pair after a pair bound before the commands was reported as fully scanned");
+    const auto rewoundTail = [&](const std::vector<std::uint32_t>& head, const std::vector<std::uint32_t>& tail, bool tailWaits, const std::string& what) {
         std::atomic<bool> ran{false};
         AgcDriver::DriverDetail::SubmitRegistrationPreparation([&] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             ran.store(true, std::memory_order_release);
         });
-        Packet packet{rewound.data(), static_cast<std::uint32_t>(rewound.size()), 0, {}};
-        Require(sceAgcDriverSubmitDcb(&packet) == 0, "a submission ending in a REWIND failed");
-        const bool rewindWaited = ran.load(std::memory_order_acquire);
-        std::atomic_ref<std::uint32_t>(rewound[1]).store(0x80000000u, std::memory_order_release);
+        std::uint32_t label = 0;
+        const auto labelAddress = reinterpret_cast<std::uintptr_t>(&label);
+        std::vector<std::uint32_t> words = head;
+        const auto control = words.size() + 1u;
+        words.insert(words.end(), {0xc0005900u, 0});
+        words.insert(words.end(), tail.begin(), tail.end());
+        words.insert(words.end(), {0xc0033700u, 0x00100200u, static_cast<std::uint32_t>(labelAddress), static_cast<std::uint32_t>(labelAddress >> 32u), 1});
+        Packet packet{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
+        Require(sceAgcDriverSubmitDcb(&packet) == 0, (what + ": the submission failed").c_str());
+        const bool submitWaited = ran.load(std::memory_order_acquire);
+        std::atomic_ref<std::uint32_t>(words[control]).store(0x80000000u, std::memory_order_release);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::atomic_ref<std::uint32_t>(label).load(std::memory_order_acquire) != 1 && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        const bool tailRan = std::atomic_ref<std::uint32_t>(label).load(std::memory_order_acquire) == 1;
+        const bool tailWaited = ran.load(std::memory_order_acquire);
         AgcDriverWaitIdle_nid_postfix();
         while (!ran.load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        Require(rewindWaited, "a submission ending in a REWIND did not wait for the queued preparations, though its tail is not scanned");
-    }
+        std::cout << what << ": submit waited " << submitWaited << ", tail waited " << tailWaited << '\n';
+        Require(tailRan, (what + ": the tail after the REWIND did not run").c_str());
+        Require(!submitWaited, (what + ": a submission whose commands before its REWIND are fully scanned waited for an unrelated preparation").c_str());
+        Require(tailWaited == tailWaits, (what + (tailWaits ? ": the tail did not wait for the queued preparations, though its scan is not complete" : ": the tail waited for an unrelated preparation, though it binds every program it uses")).c_str());
+    };
+    rewoundTail({}, pair, false, "REWIND tail binding a whole program pair");
+    rewoundTail({}, lowOnly, true, "REWIND tail writing half of a program pair");
+    alignas(4) static std::uint32_t skipped = 0;
+    const auto skippedAddress = reinterpret_cast<std::uintptr_t>(&skipped);
+    const std::vector<std::uint32_t> skippedDispatch{0xc0032200u, static_cast<std::uint32_t>(skippedAddress), static_cast<std::uint32_t>(skippedAddress >> 32u), 0, 5, 0xc0031500u, 1, 1, 1, 0x8041u};
+    rewoundTail(pair, skippedDispatch, false, "REWIND tail dispatching with the pair its head bound");
+    rewoundTail({}, skippedDispatch, true, "REWIND tail dispatching with no pair bound before it");
     commands = pair;
     waited = SubmitBehindSlowPreparation(commands, done);
     std::cout << "proven pair submit waited " << waited.count() << " ms\n";
@@ -826,6 +862,63 @@ void SharedCodeHeaders() {
     AgcDriverResolveShaderAbi_nid_postfix(&vertex.shader, {}, primitive);
     Require(sceAgcDriverSubmitDcb(&packet) == 0, "re-registered earlier header draw failed");
     AgcDriverWaitIdle_nid_postfix();
+}
+
+void RewindTailBoundPreparation() {
+    alignas(256) static const std::array<std::uint32_t, 1> code{0xbf810000u};
+    struct Header {
+        Shader shader{};
+        std::array<ShaderRegister, 7> registers{};
+        ShaderSpecialRegs specials{};
+    } header;
+    const auto address = reinterpret_cast<std::uintptr_t>(code.data());
+    const auto low = static_cast<std::uint32_t>(address >> 8u);
+    const auto high = static_cast<std::uint32_t>(address >> 40u);
+    header.shader.file_header = 0x34333231u;
+    header.shader.version = 0x18;
+    header.shader.header_size = sizeof(header);
+    header.shader.shader_size = sizeof(code);
+    header.shader.code = code.data();
+    header.shader.sh_registers = header.registers.data();
+    header.shader.num_sh_registers = header.registers.size();
+    header.shader.specials = &header.specials;
+    header.specials.dispatch_modifier = 0x8000;
+    header.registers = {{{0x20c, low}, {0x20d, high}, {0x207, 1}, {0x208, 1}, {0x209, 1}, {0x212, 0}, {0x213, 0}}};
+    AgcDriverRegisterShader_nid_postfix(&header.shader);
+    AgcDriver::DriverDetail::AwaitRegistrationPreparation();
+    const auto snapshot = AgcDriver::DriverDetail::RegisteredHeader(*AgcDriver::DriverDetail::Driver::Get().RegisteredShaders(), &header.shader);
+    Require(snapshot != nullptr, "the compute shader a REWIND tail binds was not registered");
+    {
+        std::lock_guard lock(snapshot->prepared->mutex);
+        snapshot->prepared->pending = true;
+    }
+    std::atomic<bool> prepared{false};
+    AgcDriver::DriverDetail::SubmitRegistrationPreparation([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        {
+            std::lock_guard lock(snapshot->prepared->mutex);
+            snapshot->prepared->pending = false;
+        }
+        snapshot->prepared->settled.notify_all();
+        prepared.store(true, std::memory_order_release);
+    }, snapshot->prepared.get());
+    std::uint32_t label = 0;
+    const auto labelAddress = reinterpret_cast<std::uintptr_t>(&label);
+    std::vector<std::uint32_t> words{0xc0005900u, 0, 0xc0027600u, 0x20cu, low, high, 0xc0033700u, 0x00100200u, static_cast<std::uint32_t>(labelAddress), static_cast<std::uint32_t>(labelAddress >> 32u), 1};
+    Packet packet{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
+    Require(sceAgcDriverSubmitDcb(&packet) == 0, "a submission whose REWIND tail binds a registered program failed");
+    const bool submitWaited = prepared.load(std::memory_order_acquire);
+    std::atomic_ref<std::uint32_t>(words[1]).store(0x80000000u, std::memory_order_release);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::atomic_ref<std::uint32_t>(label).load(std::memory_order_acquire) != 1 && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    const bool tailRan = std::atomic_ref<std::uint32_t>(label).load(std::memory_order_acquire) == 1;
+    const bool tailWaited = prepared.load(std::memory_order_acquire);
+    AgcDriverWaitIdle_nid_postfix();
+    while (!prepared.load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::cout << "REWIND tail binding a registered program: submit waited " << submitWaited << ", tail waited " << tailWaited << '\n';
+    Require(tailRan, "the REWIND tail binding a registered program did not run");
+    Require(!submitWaited, "a submission that binds no program before its REWIND waited for the preparation of a program only its tail binds");
+    Require(tailWaited, "a REWIND tail ran before the preparation of the program it binds");
 }
 
 void RegistrationRetry() {
@@ -2180,6 +2273,7 @@ int main(int argc, char** argv) {
         RelocatedHeaders();
         CommittedAbis();
         UnprovenProgramsAtSubmit();
+        RewindTailBoundPreparation();
         RegistrationRetry();
         RegistrationWithoutSpecials();
         Registration(argc == 2);

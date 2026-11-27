@@ -410,12 +410,14 @@ bool Driver::refreshIndirectSegment(Submission& submission, std::size_t index) {
     return true;
 }
 
-ReferencedProgramScan ReferencedPrograms(std::span<const std::uint32_t> commands, const std::map<std::size_t, std::vector<std::uint32_t>>& registerLists) {
+ReferencedProgramScan ReferencedPrograms(std::span<const std::uint32_t> commands, const std::map<std::size_t, std::vector<std::uint32_t>>& registerLists, const ReferencedProgramPairs& boundBefore) {
     constexpr std::array<std::uint32_t, 7> programRegisters{0x008u, 0x048u, 0x088u, 0x0c8u, 0x108u, 0x148u, 0x20cu};
     std::array<std::uint32_t, programRegisters.size() * 2> values{};
     std::array<bool, programRegisters.size() * 2> written{};
-    std::array<bool, programRegisters.size()> bound{};
+    static_assert(programRegisters.size() == ReferencedProgramPairs{}.size());
     ReferencedProgramScan scan;
+    auto& bound = scan.bound;
+    bound = boundBefore;
     const auto write = [&](std::uint32_t offset, std::uint32_t value, bool conditional) {
         const auto base = std::ranges::find_if(programRegisters, [&](std::uint32_t program) { return offset - program < 2u; });
         if (base == programRegisters.end()) return;
@@ -751,6 +753,21 @@ std::vector<std::uint64_t> BoundGraphicsPrograms(const Submission& submission) {
 
 }
 
+void Driver::awaitBoundPreparations(Submission& submission, const ReferencedProgramPairs& boundBefore) {
+    const auto scan = ReferencedPrograms(submission.commands, submission.registerLists, boundBefore);
+    submission.boundPrograms = scan.bound;
+    if (!scan.complete) {
+        AwaitRegistrationPreparation();
+        return;
+    }
+    std::shared_ptr<const ShaderRegistry> registry;
+    {
+        std::lock_guard lock(mutex);
+        registry = shaders;
+    }
+    if (registry != nullptr) AwaitReferencedPreparations(*registry, scan.addresses);
+}
+
 void Driver::executeRewindTail(const Submission& stalled) {
     PerformanceTimer timing("Driver.Rewind");
     static const bool ring = ReadSubmissionRingSettings();
@@ -790,6 +807,7 @@ void Driver::executeRewindTail(const Submission& stalled) {
     if (APS5_ENABLE_TIMING_LOG) tail.copiedAt = std::chrono::steady_clock::now();
     validate(tail, stalled.rewindTail);
     readRegisterLists(tail);
+    awaitBoundPreparations(tail, stalled.boundPrograms);
     if (LibraryPrebuildsWaiting()) PrioritizeLibraryPrebuilds(BoundGraphicsPrograms(tail));
     if (APS5_ENABLE_TIMING_LOG) tail.validatedAt = std::chrono::steady_clock::now();
     waitForFlipRoom(tail);
@@ -856,17 +874,7 @@ void Driver::Submit(const Packet* packet, std::uint32_t queue, bool cpuFlip) {
     waitForFlipRoom(submission);
     const bool holdsWork = holdFlipBehindWorker(submission, cpuFlip);
     std::shared_ptr<FlipWork> earlierFlipWork;
-    const auto scan = ReferencedPrograms(submission.commands, submission.registerLists);
-    if (!scan.complete || submission.rewindTail != nullptr) {
-        AwaitRegistrationPreparation();
-    } else {
-        std::shared_ptr<const ShaderRegistry> registry;
-        {
-            std::lock_guard lock(mutex);
-            registry = shaders;
-        }
-        if (registry != nullptr) AwaitReferencedPreparations(*registry, scan.addresses);
-    }
+    awaitBoundPreparations(submission, {});
     if (LibraryPrebuildsWaiting()) PrioritizeLibraryPrebuilds(BoundGraphicsPrograms(submission));
     if (APS5_ENABLE_TIMING_LOG) submission.roomReadyAt = std::chrono::steady_clock::now();
     static const bool trace = std::getenv("APS5_TRACE_GPU") != nullptr;

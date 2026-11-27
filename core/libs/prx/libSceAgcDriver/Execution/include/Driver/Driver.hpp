@@ -177,6 +177,7 @@ private:
     void waitFlipWork(std::uint64_t workSerial);
     void reserveOutputs(Submission& submission);
     void executeRewindTail(const Submission& stalled);
+    void awaitBoundPreparations(Submission& submission, const ReferencedProgramPairs& boundBefore);
     void enqueue(Submission submission);
     void noteHeldAtSubmit(Submission& submission, std::size_t cursor);
     static void forgetUnfinishedWrites(QueueWorker& worker, const Submission& submission);
